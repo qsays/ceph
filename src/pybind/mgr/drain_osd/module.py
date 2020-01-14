@@ -81,12 +81,14 @@ class Test(MgrModule):
                 self.log.error(f'OSD_IDS are empty. fail here')
             self.osd_ids = cmd['osd_ids']
             self.log.debug(f'Got OSDs <{self.osd_ids}> from the commandline')
-            # 1) check if all provided osds can be stopped
-            # 2) if yes, set weight to 0
-            # 2.1) if not, split in half until can be stopped.. if not possible return
+
+            # 1) check if all provided osds can be stopped, if not shrink until ok-to-stop
+            osd_ids = self.find_osd_stop_threshold(self.osd_ids)
+            # 2) reweight the ok-to-stop osds
+            self.reweight_osds(osd_ids)
             # 3) wait for osds to be empty initially and then send to background
-            # 4) report
             self.all_empty(self.osd_ids)
+            # 4) report
         elif cmd['prefix'] == 'placeholder':
             pass
         else:
@@ -158,6 +160,12 @@ class Test(MgrModule):
         self.log.info(f"osd: {osd_id} has no PGs anymore")
         return True
 
+    def reweight_osds(self, osd_ids: List[int]) -> bool:
+        results = []
+        for osd_id in osd_ids:
+            results.append(self.reweight_osd(osd_id))
+        return all(results)
+
     def reweight_osd(self, osd_id: int, weight: float = 0.0) -> bool:
         base_cmd = 'osd crush reweight'
         ret, out, err = self.mon_command({
@@ -173,17 +181,38 @@ class Test(MgrModule):
         self.log.info(f"command: {cmd} succeeded with: {out}")
         return True
 
+    def find_osd_stop_threshold(self, osd_ids: List[int]) -> List[int]:
+        """
+        Cut osd_id list in half until it's ok-to-stop
+
+        :param osd_ids: list of osd_ids
+        :return: list of ods_ids that can be stopped at once
+        """
+        failed = False
+        while not self.ok_to_stop(osd_ids):
+            if len(osd_ids) < 1:
+                # can't even stop one OSD, aborting
+                failed = True
+                break
+            # splitting osd_ids in half until ok_to_stop yields success
+            # maybe popping ids off one by one is better here..
+            osd_ids = osd_ids[len(osd_ids)//2:]
+        if failed:
+            return []
+        return osd_ids
+
     def ok_to_stop(self, osd_ids: List[int]) -> bool:
         base_cmd = "osd ok-to-stop"
         ret, out, err = self.mon_command({
             'prefix': base_cmd,
-            'ids': osd_ids
+            # apparently ok-to-stop allows strings only
+            'ids': [str(x) for x in osd_ids]
         })
         self.log.debug(f"running cmd: {base_cmd} on ids {osd_ids}")
         if ret != 0:
-            self.log.error(f"command: {base_cmd} failed with: {err}")
+            self.log.error(f"{osd_ids} are not ok-to-stop. {err}")
             return False
-        self.log.info(f"command: {base_cmd} succeeded with: {out}")
+        self.log.info(f"OSDs <{osd_ids}> are ok-to-stop")
         return True
 
 
