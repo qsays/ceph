@@ -2,7 +2,7 @@
 TODO
 """
 
-from typing import List
+from typing import List, Set, Any, Optional, Dict, Union
 from mgr_module import MgrModule, HandleCommandResult
 from threading import Event
 import json
@@ -12,8 +12,13 @@ class Test(MgrModule):
     # these are CLI commands we implement
     COMMANDS = [
         {
-            "cmd": "drain name=osd_ids,type=CephInt,req=true,n=N",
+            "cmd": "drain osd name=osd_ids,type=CephInt,req=true,n=N",
             "desc": "drain osd ids",
+            "perm": "r"
+        },
+        {
+            "cmd": "drain status name=osd_ids,type=CephInt,req=false,n=N",
+            "desc": "show status for osds",
             "perm": "r"
         },
     ]
@@ -39,7 +44,9 @@ class Test(MgrModule):
         # TODO: query for initial osd weight
     ]
 
-    osd_ids = []
+    osd_ids: Set[int] = set()
+    emptying_osds: Set[int] = set()
+    check_osds: List[int] = list()
 
     def __init__(self, *args, **kwargs):
         super(Test, self).__init__(*args, **kwargs)
@@ -76,21 +83,29 @@ class Test(MgrModule):
         out = ''
         err = ''
         _ = inbuf
-        if cmd['prefix'] == 'drain':
+        if cmd['prefix'] == 'drain osd':
             if not cmd['osd_ids']:
-                self.log.error(f'OSD_IDS are empty. fail here')
-            self.osd_ids = cmd['osd_ids']
+                err_msg = 'OSD_IDS are empty. fail here'
+                self.log.error(err_msg)
+                return HandleCommandResult(-errno.EINVAL, stderr=err_msg)
+            # set osd_ids from commandline, TODO: make sure to exclude duplicates
+            [self.osd_ids.add(osd_id) for osd_id in cmd['osd_ids']]
             self.log.debug(f'Got OSDs <{self.osd_ids}> from the commandline')
 
-            # 1) check if all provided osds can be stopped, if not shrink until ok-to-stop
-            osd_ids = self.find_osd_stop_threshold(self.osd_ids)
-            # 2) reweight the ok-to-stop osds
-            self.reweight_osds(osd_ids)
-            # 3) wait for osds to be empty initially and then send to background
-            self.all_empty(self.osd_ids)
-            # 4) report
-        elif cmd['prefix'] == 'placeholder':
-            pass
+            # 3) report
+            out = 'Started draining OSDs. Query progress with <fill in command>'
+        elif cmd['prefix'] == 'drain status':
+            osd_ids = cmd.get('osd_ids', list())
+            self.check_osds = osd_ids
+            if not osd_ids:
+                # load osds from self.osd_ids and self.draining_osds
+                self.log.info("Did not find osd ids from the commandline, loading..")
+                self.check_osds = self.emptying_osds
+            report = list()
+            for osd_id in self.check_osds:
+                pgs = self.get_pg_count(osd_id)
+                report.append(dict(osd_id=osd_id, pgs=pgs))
+            out = f"here's the status: {report}"
         else:
             return (-errno.EINVAL, '',
                     "Command not found '{0}'".format(cmd['prefix']))
@@ -105,17 +120,39 @@ class Test(MgrModule):
         This method is called by the mgr when the module starts and can be
         used for any background activity.
         """
-        self.log.info("Starting")
+        self.log.info("Starting mgr/drain_osds")
         while self.run:
             # Do some useful background work here.
+
+            self.log.debug(f"Scheduled for draining: <{self.osd_ids}>")
+            self.log.debug(f"Currently being drained: <{self.emptying_osds}>")
+            # the state should be saved to the mon store in the actual call and
+            # then retrieved in serve() probably
+
+            # 1) check if all provided osds can be stopped, if not, shrink list until ok-to-stop
+            [self.emptying_osds.add(x) for x in self.find_osd_stop_threshold(self.osd_ids)]
+
+            # remove the emptying osds from the osd_ids since they don't need to be checked again.
+            self.osd_ids = self.osd_ids.difference(self.emptying_osds)
+
+            # 2) reweight the ok-to-stop osds, ONCE
+            self.reweight_osds(self.emptying_osds)
+
+            # 3) check for osds to be empty
+            empty_osds = self.empty_osds(self.emptying_osds)
+
+            # remove osds that are marked as empty
+            self.emptying_osds = self.emptying_osds.difference(empty_osds)
 
             # Use mgr_tick_period (default: 2) here just to illustrate
             # consuming native ceph options.  Any real background work
             # would presumably have some more appropriate frequency.
             sleep_interval = self.mgr_tick_period
+            # monkey_patching sleep_internal # FIXME
+            sleep_interval = 4 # FIXME
             # TODO: add set_health_checks
             self.log.debug('Sleeping for %d seconds', sleep_interval)
-            ret = self.event.wait(sleep_interval)
+            self.event.wait(sleep_interval)
             self.event.clear()
 
     def shutdown(self):
@@ -137,36 +174,59 @@ class Test(MgrModule):
                 return False
         return True
 
-    def all_empty(self, osd_ids: List[int]) -> bool:
+    def empty_osds(self, osd_ids: Set[int]) -> List[int]:
+        if not osd_ids:
+            return True
+        osd_df_data = self.osd_df()
+        empty_osds = list()
         for osd_id in osd_ids:
-            if not self.is_empty(osd_id):
-                return False
-        return True
+            if self.is_empty(osd_id, osd_df=osd_df_data):
+                empty_osds.append(osd_id)
+        return empty_osds
 
-    def is_empty(self, osd_id: int) -> bool:
+    def osd_df(self) -> dict:
         base_cmd = 'osd df'
         ret, out, err = self.mon_command({
             'prefix': base_cmd,
             'format': 'json'
         })
-        osd_df = json.loads(out)
-        osd_nodes = osd_df.get('nodes', [])
-        for osd_node in osd_nodes:
-            if osd_node.get('id', None) == int(osd_id):
-                pgs = osd_node.get('pgs')
-                if pgs != 0:
-                    self.log.info(f"osd: {osd_id} still has {pgs} PGs.")
-                    return False
+        return json.loads(out)
+
+    def is_empty(self, osd_id: int, osd_df: Optional[dict] = None) -> bool:
+        pgs = self.get_pg_count(osd_id, osd_df=osd_df)
+        if pgs != 0:
+            self.log.info(f"osd: {osd_id} still has {pgs} PGs.")
+            return False
         self.log.info(f"osd: {osd_id} has no PGs anymore")
         return True
 
-    def reweight_osds(self, osd_ids: List[int]) -> bool:
+    def reweight_osds(self, osd_ids: Set[int]) -> bool:
         results = []
         for osd_id in osd_ids:
             results.append(self.reweight_osd(osd_id))
         return all(results)
 
+    def get_pg_count(self, osd_id: int, osd_df: Optional[dict] = None) -> int:
+        if not osd_df:
+            osd_df = self.osd_df()
+        osd_nodes = osd_df.get('nodes', [])
+        for osd_node in osd_nodes:
+            if osd_node.get('id', None) == int(osd_id):
+                return osd_node.get('pgs')
+        return -1
+
+    def get_osd_weight(self, osd_id):
+        osd_map = self.get_osdmap()
+        cluster_osds = [x for x in osd_map.dump().get('osds', [])]
+        for osd in cluster_osds:
+            if osd.get('osd') == osd_id:
+                return osd.get('weight')
+
     def reweight_osd(self, osd_id: int, weight: float = 0.0) -> bool:
+        # TODO: if not already weighted with 0
+        if self.get_osd_weight(osd_id) == weight:
+            self.log.info(f"OSD <{osd_id}> is already weighted with: {weight}")
+            return True
         base_cmd = 'osd crush reweight'
         ret, out, err = self.mon_command({
             'prefix': base_cmd,
@@ -181,25 +241,27 @@ class Test(MgrModule):
         self.log.info(f"command: {cmd} succeeded with: {out}")
         return True
 
-    def find_osd_stop_threshold(self, osd_ids: List[int]) -> List[int]:
+    def find_osd_stop_threshold(self, osd_ids: Set[int]) -> Set[int]:
         """
         Cut osd_id list in half until it's ok-to-stop
 
         :param osd_ids: list of osd_ids
         :return: list of ods_ids that can be stopped at once
         """
-        failed = False
-        while not self.ok_to_stop(osd_ids):
-            if len(osd_ids) < 1:
+        if not osd_ids:
+            return set()
+        _osds: List[int] = list(osd_ids.copy())
+        while not self.ok_to_stop(_osds):
+            if len(_osds) <= 1:
                 # can't even stop one OSD, aborting
-                failed = True
-                break
+                self.log.info("Can't even stop one OSD. Cluster is probably busy. Retrying later..")
+                return set()
+            self.event.wait(1)
             # splitting osd_ids in half until ok_to_stop yields success
-            # maybe popping ids off one by one is better here..
-            osd_ids = osd_ids[len(osd_ids)//2:]
-        if failed:
-            return []
-        return osd_ids
+            # maybe popping ids off one by one is better here..depends on the cluster size I guess..
+            # There's a lot of room for micro adjustments here
+            _osds = _osds[len(_osds)//2:]
+        return set(_osds)
 
     def ok_to_stop(self, osd_ids: List[int]) -> bool:
         base_cmd = "osd ok-to-stop"
