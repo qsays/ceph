@@ -8,7 +8,7 @@ from threading import Event
 import json
 import errno
 
-class Test(MgrModule):
+class DrainOSDs(MgrModule):
     # these are CLI commands we implement
     COMMANDS = [
         {
@@ -19,6 +19,11 @@ class Test(MgrModule):
         {
             "cmd": "drain status name=osd_ids,type=CephInt,req=false,n=N",
             "desc": "show status for osds",
+            "perm": "r"
+        },
+        {
+            "cmd": "drain stop name=osd_ids,type=CephInt,req=false,n=N",
+            "desc": "show status for osds. Stopping all if osd_ids are omitted",
             "perm": "r"
         },
     ]
@@ -46,10 +51,10 @@ class Test(MgrModule):
 
     osd_ids: Set[int] = set()
     emptying_osds: Set[int] = set()
-    check_osds: List[int] = list()
+    check_osds: Set[int] = set()
 
     def __init__(self, *args, **kwargs):
-        super(Test, self).__init__(*args, **kwargs)
+        super(DrainOSDs, self).__init__(*args, **kwargs)
 
         # set up some members to enable the serve() method and shutdown()
         self.run = True
@@ -88,24 +93,42 @@ class Test(MgrModule):
                 err_msg = 'OSD_IDS are empty. fail here'
                 self.log.error(err_msg)
                 return HandleCommandResult(-errno.EINVAL, stderr=err_msg)
-            # set osd_ids from commandline, TODO: make sure to exclude duplicates
+            # set osd_ids from commandline
             [self.osd_ids.add(osd_id) for osd_id in cmd['osd_ids']]
+
+            not_found: Set[int] = self.osds_not_in_cluster(self.osd_ids)
+            if not_found:
+                # flushing osd_ids due to the serve() thread
+                self.osd_ids = set()
+                return -errno.EINVAL, '', f"OSDs <{not_found}> not found in cluster"
+
             self.log.debug(f'Got OSDs <{self.osd_ids}> from the commandline')
 
-            # 3) report
-            out = 'Started draining OSDs. Query progress with <fill in command>'
+            out = 'Started draining OSDs. Query progress with <ceph drain status>'
         elif cmd['prefix'] == 'drain status':
-            osd_ids = cmd.get('osd_ids', list())
-            self.check_osds = osd_ids
-            if not osd_ids:
-                # load osds from self.osd_ids and self.draining_osds
-                self.log.info("Did not find osd ids from the commandline, loading..")
-                self.check_osds = self.emptying_osds
+            self.check_osds = set()
+            # assemble a set of emptying osds and to_be_emptied osds
+            self.check_osds.update(self.emptying_osds)
+            self.check_osds.update(self.osd_ids)
+
+            not_found = self.osds_not_in_cluster(self.osd_ids)
+            if not_found:
+                self.osd_ids = set()
+                return -errno.EINVAL, '', f"OSDs <{not_found}> not found in cluster"
+
             report = list()
             for osd_id in self.check_osds:
                 pgs = self.get_pg_count(osd_id)
                 report.append(dict(osd_id=osd_id, pgs=pgs))
-            out = f"here's the status: {report}"
+            out = f"{report}"
+        elif cmd['prefix'] == 'drain stop':
+            if not cmd['osd_ids']:
+                self.log.debug("No osd_ids provided, stopping all OSD drains(??)")
+                self.osd_ids = set()
+                self.emptying_osds = set()
+                # TODO: set initial reweight (todo#2: save the initial reweight)
+                # this is just a poor-man's solution as it will not really stop draining
+                # the osds..
         else:
             return (-errno.EINVAL, '',
                     "Command not found '{0}'".format(cmd['prefix']))
@@ -164,15 +187,16 @@ class Test(MgrModule):
         self.run = False
         self.event.set()
 
-    def osds_in_cluster(self, osd_ids: List[int]) -> bool:
+    def osds_not_in_cluster(self, osd_ids: Set[int]) -> Set[int]:
         self.log.info(f"Checking if provided osds <{osd_ids}> exist in the cluster")
         osd_map = self.get_osdmap()
         cluster_osds = [x.get('osd') for x in osd_map.dump().get('osds', [])]
+        not_in_cluster = set()
         for osd_id in osd_ids:
             if int(osd_id) not in cluster_osds:
                 self.log.error(f"Could not find {osd_id} in cluster")
-                return False
-        return True
+                not_in_cluster.add(osd_id)
+        return not_in_cluster
 
     def empty_osds(self, osd_ids: Set[int]) -> List[int]:
         if not osd_ids:
@@ -185,6 +209,7 @@ class Test(MgrModule):
         return empty_osds
 
     def osd_df(self) -> dict:
+        # TODO: this should be cached I think
         base_cmd = 'osd df'
         ret, out, err = self.mon_command({
             'prefix': base_cmd,
@@ -215,17 +240,16 @@ class Test(MgrModule):
                 return osd_node.get('pgs')
         return -1
 
-    def get_osd_weight(self, osd_id):
-        osd_map = self.get_osdmap()
-        cluster_osds = [x for x in osd_map.dump().get('osds', [])]
-        for osd in cluster_osds:
-            if osd.get('osd') == osd_id:
-                return osd.get('weight')
+    def get_osd_weight(self, osd_id: int) -> float:
+        osd_df = self.osd_df()
+        osd_nodes = osd_df.get('nodes', [])
+        for osd_node in osd_nodes:
+            if osd_node.get('id', None) == int(osd_id):
+                return float(osd_node.get('crush_weight'))
 
     def reweight_osd(self, osd_id: int, weight: float = 0.0) -> bool:
-        # TODO: if not already weighted with 0
         if self.get_osd_weight(osd_id) == weight:
-            self.log.info(f"OSD <{osd_id}> is already weighted with: {weight}")
+            self.log.debug(f"OSD <{osd_id}> is already weighted with: {weight}")
             return True
         base_cmd = 'osd crush reweight'
         ret, out, err = self.mon_command({

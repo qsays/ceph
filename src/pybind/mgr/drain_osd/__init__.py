@@ -1,1 +1,1 @@
-from .module import Test
+from .module import DrainOSDs
