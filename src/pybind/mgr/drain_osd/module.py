@@ -88,47 +88,56 @@ class DrainOSDs(MgrModule):
         out = ''
         err = ''
         _ = inbuf
-        if cmd['prefix'] == 'drain osd':
-            if not cmd['osd_ids']:
+        if cmd.get('prefix', '') == 'drain osd':
+            osd_ids = cmd.get('osd_ids', list())
+            if not osd_ids:
                 err_msg = 'OSD_IDS are empty. fail here'
                 self.log.error(err_msg)
                 return HandleCommandResult(-errno.EINVAL, stderr=err_msg)
-            # set osd_ids from commandline
-            [self.osd_ids.add(osd_id) for osd_id in cmd['osd_ids']]
 
-            not_found: Set[int] = self.osds_not_in_cluster(self.osd_ids)
+            # get osd_ids from commandline
+
+            not_found: Set[int] = self.osds_not_in_cluster()
             if not_found:
-                # flushing osd_ids due to the serve() thread
-                self.osd_ids = set()
                 return -errno.EINVAL, '', f"OSDs <{not_found}> not found in cluster"
+            # add osd_ids to set
+            [self.osd_ids.add(osd_id) for osd_id in osd_ids]
 
-            self.log.debug(f'Got OSDs <{self.osd_ids}> from the commandline')
+            self.log.info(f'Scheduling OSD(s) <{self.osd_ids}> to be drained')
 
             out = 'Started draining OSDs. Query progress with <ceph drain status>'
-        elif cmd['prefix'] == 'drain status':
+
+        elif cmd.get('prefix') == 'drain status':
+            # re-initialize it with an empty set on invocation (long running processes)
             self.check_osds = set()
             # assemble a set of emptying osds and to_be_emptied osds
             self.check_osds.update(self.emptying_osds)
             self.check_osds.update(self.osd_ids)
-
-            not_found = self.osds_not_in_cluster(self.osd_ids)
-            if not_found:
-                self.osd_ids = set()
-                return -errno.EINVAL, '', f"OSDs <{not_found}> not found in cluster"
 
             report = list()
             for osd_id in self.check_osds:
                 pgs = self.get_pg_count(osd_id)
                 report.append(dict(osd_id=osd_id, pgs=pgs))
             out = f"{report}"
-        elif cmd['prefix'] == 'drain stop':
-            if not cmd['osd_ids']:
+
+        elif cmd.get('prefix', '') == 'drain stop':
+            osd_ids: List[int] = cmd.get('osd_ids', list())
+            if not osd_ids:
                 self.log.debug("No osd_ids provided, stopping all OSD drains(??)")
                 self.osd_ids = set()
                 self.emptying_osds = set()
+
                 # TODO: set initial reweight (todo#2: save the initial reweight)
                 # this is just a poor-man's solution as it will not really stop draining
-                # the osds..
+                # the osds. It will just stop the queries and also prevent any scheduled OSDs
+                # from getting drained at a later point in time.
+                out = "Stopped all draining operations"
+
+            else:
+                self.osd_ids = self.osd_ids.difference(osd_ids)
+                self.emptying_osds = self.emptying_osds.difference(osd_ids)
+                out = f"Stopped draining operations for OSD(s): {osd_ids}"
+
         else:
             return (-errno.EINVAL, '',
                     "Command not found '{0}'".format(cmd['prefix']))
