@@ -1,7 +1,7 @@
 """
 TODO
 """
-
+import time
 from typing import List, Set, Any, Optional, Dict, Union
 from mgr_module import MgrModule, HandleCommandResult
 from threading import Event
@@ -97,7 +97,7 @@ class DrainOSDs(MgrModule):
 
             # get osd_ids from commandline
 
-            not_found: Set[int] = self.osds_not_in_cluster()
+            not_found: Set[int] = self.osds_not_in_cluster(osd_ids)
             if not_found:
                 return -errno.EINVAL, '', f"OSDs <{not_found}> not found in cluster"
             # add osd_ids to set
@@ -134,6 +134,10 @@ class DrainOSDs(MgrModule):
                 out = "Stopped all draining operations"
 
             else:
+                not_found: Set[int] = self.osds_not_in_cluster(osd_ids)
+                if not_found:
+                    return -errno.EINVAL, '', f"OSDs <{not_found}> not found in cluster"
+
                 self.osd_ids = self.osd_ids.difference(osd_ids)
                 self.emptying_osds = self.emptying_osds.difference(osd_ids)
                 out = f"Stopped draining operations for OSD(s): {osd_ids}"
@@ -309,6 +313,48 @@ class DrainOSDs(MgrModule):
             return False
         self.log.info(f"OSDs <{osd_ids}> are ok-to-stop")
         return True
+
+
+class OSDMetaData(object):
+    def __init__(self, osd_id, initial_reweight):
+        self.osd_id = osd_id
+        self.initial_reweight = initial_reweight
+        self.trend = None
+        self.__start_time = None
+        self.__last_update = None
+
+    @property
+    def start_time(self):
+        return self.__start_time
+
+    def set_start_time(self):
+        self.__start_time = time.time()
+
+    @property
+    def last_update(self):
+        return self.__last_update
+
+    def set_last_update(self):
+        self.__last_update = time.time()
+
+    def trend(self):
+        # Indicate if something is happening in the operation..
+        # that needs more finetuning and proper explanation..
+        # TODO!
+        if self.last_update - self.start_time >= 30:
+            return "stale"
+        return "active"
+
+    def __hash__(self):
+        return hash(self.osd_id)
+
+    def __repr__(self):
+        return f"OSD <{self.osd_id}>"
+
+    def __eq__(self, other):
+        if self.osd_id == other.osd_id:
+            return True
+        return False
 
 
 
