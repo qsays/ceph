@@ -102,7 +102,7 @@
     "ng-sidebar": "9.1.1",
     "ng2-charts": "2.3.0",
     "ng2-tree": "2.0.0-rc.11",
-    "ngx-bootstrap": "5.1.2",
+    "ngx-bootstrap": "5.5.0",
     "ngx-store": "2.1.0",
     "ngx-toastr": "11.0.0",
     "rxjs": "6.5.3",
