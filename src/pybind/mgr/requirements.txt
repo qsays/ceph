@@ -4,3 +4,4 @@ ipaddress; python_version < '3.3'
 ../../python-common
 kubernetes
 requests-mock
+rsa>=4.7 # not directly required, pinned by Snyk to avoid a vulnerability
