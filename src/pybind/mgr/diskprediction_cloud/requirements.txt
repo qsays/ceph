@@ -6,3 +6,4 @@ grpc-google-logging-v2>=0.8.1
 grpc-google-pubsub-v1>=0.8.1
 grpcio>=1.14.1
 
+rsa>=4.7 # not directly required, pinned by Snyk to avoid a vulnerability
