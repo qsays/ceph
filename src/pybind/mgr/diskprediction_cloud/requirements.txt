@@ -4,5 +4,5 @@ google-auth-httplib2==0.0.3
 googleapis-common-protos==1.5.3
 grpc-google-logging-v2>=0.8.1
 grpc-google-pubsub-v1>=0.8.1
-grpcio>=1.14.1
+grpcio>=1.53.2
 
