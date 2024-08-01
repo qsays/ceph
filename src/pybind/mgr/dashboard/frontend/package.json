@@ -91,7 +91,7 @@
     "@ngx-translate/i18n-polyfill": "1.0.0",
     "@swimlane/ngx-datatable": "15.0.2",
     "async-mutex": "0.1.4",
-    "bootstrap": "4.3.1",
+    "bootstrap": "5.0.0",
     "chart.js": "2.8.0",
     "detect-browser": "4.7.0",
     "fork-awesome": "1.1.7",
