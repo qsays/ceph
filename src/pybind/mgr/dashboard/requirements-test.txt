@@ -3,3 +3,5 @@ pytest<4
 pytest-cov
 pytest-instafail
 pyfakefs
+setuptools>=70.0.0 # not directly required, pinned by Snyk to avoid a vulnerability
+zipp>=3.19.1 # not directly required, pinned by Snyk to avoid a vulnerability
